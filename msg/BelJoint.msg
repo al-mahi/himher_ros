@@ -1,0 +1,13 @@
+Header header
+string name
+string src
+float32[] locNED
+float32[] gnorm
+float32[] shape
+float32[] u
+float32[] v
+float32[] w
+float32[] uvwLoc
+float32[] hriTouchXs
+float32[] hriTouchYs
+float32[] hriTouchZs

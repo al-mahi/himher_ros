@@ -1,0 +1,11 @@
+Header header
+string name
+string src
+bool exist
+float32 north
+float32 east
+float32 up
+float32 co2s
+float32 temperature
+float32 humidity
+float32 std_ned
