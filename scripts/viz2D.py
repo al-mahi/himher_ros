@@ -25,7 +25,7 @@ def update_all(num, unused):
     plt.ylabel('Y')
     # plt.xlim(minX, maxX)
     # plt.ylim(minY, maxY)
-    plt.title("E={:0>6.2f} N={:0>6.2f} Alt={:0>6.2f}\nuvw={}-->{}".format(locNED[0], locNED[1], locNED[2], np.around(gp, decimals=4), np.around(gpnorm, decimals=4)))
+    plt.title("E={:0>6.2f} N={:0>6.2f} Alt={:0>6.2f}\n{}".format(locNED[0], locNED[1], locNED[2], np.around(gpnorm, decimals=4)))
 
     # rospy.logdebug("{} gp {}".format(tag, gp))
     plt.quiver(locNED[0], locNED[1], -gpnorm[0], -gpnorm[1])

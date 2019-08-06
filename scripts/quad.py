@@ -5,31 +5,30 @@ import time
 from multiprocessing import Process
 import copy
 import numpy as np
-from scipy.stats import multivariate_normal
-from scipy.special import logit
-from scipy.spatial import KDTree
 from scipy.signal import unit_impulse
+from scipy.stats import norm
 from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
 from sklearn.mixture.gaussian_mixture import _compute_precision_cholesky
 import rospy
 from dronekit import Vehicle, connect, LocationGlobalRelative, LocationGlobal, LocationLocal, VehicleMode
 from pymavlink import mavutil
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 import timeit
+
 
 from himher_ros.msg import BelParam, BelJointParam, BelJoint
 
 
-def send_ned_velocity(uvwNormVel):
+def send_ned_velocity(uvwLoc):
     """
     Move vehicle in direction based on specified velocity vectors.
     file:///home/alien/Downloads/dronekit/guide/vehicle_state_and_parameters.html
     """
-    vel = 3.  # m/s
-    uvwLocNormVel = np.nan_to_num(uvwNormVel, 0.)
-    velocity_x, velocity_y, velocity_z = vel * uvwLocNormVel[1], vel * uvwLocNormVel[0], vel * uvwLocNormVel[2]
-
+    vel = 5. * 2.  # m/s at average cdf=.5
+    m = norm(7.8, 15.22).cdf(np.sum(uvwLoc**2.))
+    uvwLocNorm = -(uvwLoc / np.abs(uvwLoc).max())
+    uvwVel = m * vel * uvwLocNorm
+    velocity_x, velocity_y, velocity_z = uvwVel[1], uvwVel[0], uvwVel[2]
+    rospy.logdebug("{} m={} mXv={} uvw={} norm={} vel={}".format(tag, m, m*vel, uvwLoc, uvwLocNorm, velocity_x, velocity_y, velocity_z))
     if vehicle.mode.name != "GUIDED":
         rospy.logerr("{} send_ned_ve not in Guided mode {}".format(tag, vehicle.mode.name))
         return
@@ -323,10 +322,12 @@ while not rospy.is_shutdown():
         gmLgPdf = gmm.score_samples(X).reshape(xx.shape)
 
         jCollision = wCollision * normalizeArr(gmLgPdf)
-        J = normalizeArr(jCollision + jExplore + jFence)
+        J = wCollision * normalizeArr(jCollision) + wExplore * normalizeArr(jExplore) + wFence * normalizeArr(jFence)
     else:
 
-        J = normalizeArr(jExplore + jFence)
+        J = wExplore * normalizeArr(jExplore) + wFence * normalizeArr(jFence)
+
+    J = normalizeArr(J)
 
     loc = locNEU()
     nearestIndX = np.linalg.norm(X - loc, axis=1).argmin()
@@ -337,10 +338,12 @@ while not rospy.is_shutdown():
     # Gradient Calculation
     dFx, dFy, dFz = u, v, w = np.gradient(J)
 
-    uvwLoc = np.array([u[indNN], v[indNN], w[indNN]])
-    uvwLocNormVel = -(uvwLoc / np.abs(uvwLoc).max())
+    # mag = np.sqrt(u**2 + v**2 + w**2)
+    # rospy.logdebug("{} min={} max{}, mean={} std={}".format(tag, mag.min(), mag.max(), mag.mean(), mag.std()))
 
-    if name != "A": send_ned_velocity(uvwNormVel=uvwLocNormVel)
+    uvwLoc = np.array([u[indNN], v[indNN], w[indNN]])
+
+    if name != "A": send_ned_velocity(uvwLoc=uvwLoc)
 
     msgHRI = BelJoint()
     msgHRI.name = name
@@ -350,5 +353,5 @@ while not rospy.is_shutdown():
     msgHRI.uvwLoc = uvwLoc.flatten()
     pubBelJoint.publish(msgHRI)
 
-    if name != "A": rospy.logdebug("{} {} liveNb {} means {}  uvwLoc={} time={}".format(tag, loc, liveNbrs, meansList, uvwLoc, timeit.default_timer()-start))
+    # if name != "A": rospy.logdebug("{} {} {} means {}  uvwLoc={} time={}".format(tag, loc, liveNbrs, meansList, uvwLoc, timeit.default_timer()-start))
     rate.sleep()
