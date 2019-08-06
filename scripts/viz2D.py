@@ -15,25 +15,24 @@ def update_all(num, unused):
     trans = lambda XX: np.reshape(np.asanyarray(XX, order='C'), xx.shape)
     global msgHRI  # type: msgHRI BelJoint
     if msgHRI is None: return
-    rospy.logdebug("{} uvwLoc {}".format(tag, msgHRI.uvwLoc))
-    J = trans(msgHRI.gnorm)
-    u = trans(msgHRI.u)
-    v = trans(msgHRI.v)
-    w = trans(msgHRI.w)
+    J = trans(msgHRI.J)
     locNED = np.asanyarray(msgHRI.locNED)
     gp = np.asanyarray(msgHRI.uvwLoc)
-    gpnorm = gp/gp.max()
+    gpnorm = gp/np.abs(gp).max()
 
     plt.cla()
     plt.xlabel('X')
     plt.ylabel('Y')
-    plt.xlim(minX, maxX)
-    plt.ylim(minY, maxY)
-    plt.title("E={:0>6.2f} N={:0>6.2f} Alt={:0>6.2f}".format(locNED[0], locNED[1], locNED[2]))
+    # plt.xlim(minX, maxX)
+    # plt.ylim(minY, maxY)
+    plt.title("E={:0>6.2f} N={:0>6.2f} Alt={:0>6.2f}\nuvw={}-->{}".format(locNED[0], locNED[1], locNED[2], np.around(gp, decimals=4), np.around(gpnorm, decimals=4)))
 
-    rospy.logdebug("{} gp {}".format(tag, gp))
-    plt.quiver(locNED[0], locNED[1], gpnorm[0], gpnorm[1])
-    p = plt.contour(xx[:, :, 1], yy[:, :, 1], J[:, :, int(locNED[2]/resolution)])
+    # rospy.logdebug("{} gp {}".format(tag, gp))
+    plt.quiver(locNED[0], locNED[1], -gpnorm[0], -gpnorm[1])
+    try:
+        p = plt.contour(xx[:, :, 1], yy[:, :, 1], J[:, :, int((atAlt-minZ)/resolution)])
+    except IndexError as e:
+        rospy.logerr("{} IdexError {} msgHRI uvwLoc={} loc={}".format(tag,e.message, msgHRI.uvwLoc, msgHRI.locNED))
     msgHRI = None
 
 
@@ -83,6 +82,7 @@ minY = int(rospy.get_param("/minY"))
 maxY = int(rospy.get_param("/maxY"))
 minZ = int(rospy.get_param("/minZ"))
 maxZ = int(rospy.get_param("/maxZ"))
+atAlt = int(rospy.get_param("~atAlt"))
 resolution = int(rospy.get_param("/res"))
 oLat = float(rospy.get_param("/origin_lat"))
 oLon = float(rospy.get_param("/origin_lon"))
@@ -94,16 +94,16 @@ tag = "{}vz: ".format(name)
 x = np.arange(minX, maxX + resolution, resolution)
 y = np.arange(minY, maxY + resolution, resolution)
 z = np.arange(minZ, maxZ + resolution, resolution)
-xx, yy, zz = np.meshgrid(x, y, z)
+xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
 X = np.array([xx.flatten(), yy.flatten(), zz.flatten()]).T
 
 q_size = 10
 rospy.Subscriber(
-    "/UAV/{}/bel_joint".format(name), callback=cbBelJoint,
+    "/UAV/{}/bel_joint".format(name[0]), callback=cbBelJoint,
     data_class=BelJoint, queue_size=q_size
 )
 
-rate = rospy.Rate(1)
+rate = rospy.Rate(10)
 visualization()
 while not rospy.is_shutdown():
     rate.sleep()

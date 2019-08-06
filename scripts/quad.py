@@ -6,25 +6,34 @@ from multiprocessing import Process
 import copy
 import numpy as np
 from scipy.stats import multivariate_normal
+from scipy.special import logit
+from scipy.spatial import KDTree
+from scipy.signal import unit_impulse
+from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
+from sklearn.mixture.gaussian_mixture import _compute_precision_cholesky
 import rospy
 from dronekit import Vehicle, connect, LocationGlobalRelative, LocationGlobal, LocationLocal, VehicleMode
 from pymavlink import mavutil
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import timeit
 
 from himher_ros.msg import BelParam, BelJointParam, BelJoint
 
 
-def send_ned_velocity(velocity_x, velocity_y, velocity_z):
+def send_ned_velocity(uvwNormVel):
     """
     Move vehicle in direction based on specified velocity vectors.
     file:///home/alien/Downloads/dronekit/guide/vehicle_state_and_parameters.html
     """
+    vel = 3.  # m/s
+    uvwLocNormVel = np.nan_to_num(uvwNormVel, 0.)
+    velocity_x, velocity_y, velocity_z = vel * uvwLocNormVel[1], vel * uvwLocNormVel[0], vel * uvwLocNormVel[2]
 
-    while not vehicle.mode.name == "GUIDED":
-        vehicle.mode = VehicleMode("GUIDED")
+    if vehicle.mode.name != "GUIDED":
+        rospy.logerr("{} send_ned_ve not in Guided mode {}".format(tag, vehicle.mode.name))
+        return
 
-    # rospy.logdebug("{} vel mode".format(tag, vehicle.mode.name))
     msg = vehicle.message_factory.set_position_target_local_ned_encode(
         0,  # time_boot_ms (not used)
         0, 0,  # target system, target component
@@ -35,9 +44,10 @@ def send_ned_velocity(velocity_x, velocity_y, velocity_z):
         0, 0, 0,  # x, y, z acceleration (not supported yet, ignored in GCS_Mavlink)
         0, 0)  # yaw, yaw_rate (not supported yet, ignored in GCS_Mavlink)
     # send command to vehicle on 1 Hz cycle
-    for _ in range(0, 4):
-        vehicle.send_mavlink(msg)
-        time.sleep(.1)
+    vehicle.send_mavlink(msg)
+    # for _ in range(2):
+    #     vehicle.send_mavlink(msg)
+    #     rospy.sleep(rospy.Duration.from_sec(.15))
 
 
 def locGPS():
@@ -56,67 +66,22 @@ def locNEU():
     ])
 
 
-def toLocMesh(neu):
-    loc = np.round(neu)
-    return np.where(np.logical_and(np.logical_and(xx == loc[0], yy == loc[1]), zz == loc[2]))
+def indXtoJ(indX):
+    """converts index from NED coordinate in array X to index of array J"""
+    return np.unravel_index(indX % xx.size, xx.shape)
 
 
-def phiFence(X):
-    def calc(x):
-        tol = 2
-        if x[0] < minX + tol or x[0] > maxX - tol or \
-                x[1] < minY + tol or x[1] > maxY - tol or \
-                x[2] < minZ + tol or x[2] > maxZ - tol:
-            return np.linalg.norm(x)
-        return 0.
-
-    res = np.array(map(calc, X))
-    return res
+def phiFence():
+    fence = np.zeros(xx.shape)
+    for i in range(3):
+        fence += 100. * (unit_impulse(xx.swapaxes(0, i).shape, (0,)) + unit_impulse(xx.swapaxes(0, i).shape, (-1,))).swapaxes(0, i)
+        fence += 060. * (unit_impulse(xx.swapaxes(0, i).shape, (1,)) + unit_impulse(xx.swapaxes(0, i).shape, (-2,))).swapaxes(0, i)
+        fence += 010. * (unit_impulse(xx.swapaxes(0, i).shape, (2,)) + unit_impulse(xx.swapaxes(0, i).shape, (-3,))).swapaxes(0, i)
+    return fence
 
 
-def updateMyBel(nbsJointBel, nb):
-    """:type nbsJointBel: BelJointParam"""
+def normalizeArr(arr, maxVal=100.): return maxVal * np.nan_to_num((arr - arr.min()) / arr.ptp(), 0.)
 
-    if nbsJointBel.name == '': return
-    # rospy.logdebug("{}<=={} start {}<=={}".format(
-    #     tag, nb, [msgBelJoint.name, msgBelJoint.A.exist, msgBelJoint.B.exist, msgBelJoint.C.exist],
-    #     [nbsJointBel.name, nbsJointBel.A.exist, nbsJointBel.B.exist, nbsJointBel.C.exist])
-    # )
-
-    if name != "A" and nbsJointBel.A.exist:  # no need to hear about itself and hear if any msg exist
-        msgBelJoint.A = nbsJointBel.A
-        msgBelJoint.A.src = nb
-
-    if name != "B" and nbsJointBel.B.exist:
-        msgBelJoint.B = nbsJointBel.B
-        msgBelJoint.B.src = nb
-
-    if name != "C" and nbsJointBel.C.exist:
-        msgBelJoint.C = nbsJointBel.C
-        msgBelJoint.C.src = nb
-
-    # rospy.logdebug("{}<=={} done {}<=={}".format(
-    #     tag, nb, [msgBelJoint.name, msgBelJoint.A.exist, msgBelJoint.B.exist, msgBelJoint.C.exist],
-    #     [nbsJointBel.name, nbsJointBel.A.exist, nbsJointBel.B.exist, nbsJointBel.C.exist])
-    # )
-
-
-def fastNN(P):
-    ceilRes = lambda x: resolution * (np.divmod(x, resolution)[0] + 1)
-    floorRes = lambda x: resolution * (np.divmod(x, resolution)[0])
-    minp = None
-    mind = np.inf
-    # print("P={}".format(P))
-    for up in ["{0:03b}".format(i) for i in range(8)]:
-        p = np.zeros(3, dtype=np.int)
-        for i in range(3):
-            p[i] = ceilRes(P[i]) if up[i] == '1' else floorRes(P[i])
-        d = np.linalg.norm(P-p)
-        if mind > d:
-            mind = d
-            minp = p.copy()
-        # print(up, p, d, mind, minp)
-    return mind, tuple(minp)
 
 instanceOf = {
     "A": 0,
@@ -151,57 +116,95 @@ oLon = float(rospy.get_param("/origin_lon"))
 oAlt = float(rospy.get_param("/origin_alt"))
 neighbors = rospy.get_param("~neighbors").split("_")
 team = [c for c in "ABC"]
+rospy.logdebug("{} team {}".format(name, team))
 tag = "{}: ".format(name)
-vel = 2.5  # m/s
-
+scaleX = maxX-minX
+scaleY = maxY-minY
+scaleZ = maxZ-minZ
 ###############################################################################
 # Meshgrid Space
 x = np.arange(minX, maxX + resolution, resolution)
 y = np.arange(minY, maxY + resolution, resolution)
 z = np.arange(minZ, maxZ + resolution, resolution)
-xx, yy, zz = np.meshgrid(x, y, z)
+xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
 X = np.array([xx.flatten(), yy.flatten(), zz.flatten()]).T
 
 vehicle = connect('udpin:0.0.0.0:{}'.format(portOf[name]), wait_ready=True, baud=57600)
 vehicle.home_location = LocationGlobal(lat=oLat, lon=oLon, alt=oAlt)
 
 rospy.sleep(3)
-if name!="A": vehicle.mode = VehicleMode("GUIDED")
+if name!="A":
+    vehicle.mode = VehicleMode("GUIDED")
+    rospy.sleep(3)
+    vehicle.mode = VehicleMode("GUIDED")
 
 # initialize belief calculations
 belExplore = np.zeros(xx.shape)
-belPos = np.zeros(xx.shape)
-belFence = np.zeros(xx.shape)
 
-belExplore[0, 0, 0] = 1
+belExplore[0, :, :] = 1.
+belExplore[:, 0, :] = 1.
+belExplore[:, :, 0] = 1.
+belExplore[-1, :, :] = 1.
+belExplore[:, -1, :] = 1.
+belExplore[:, :, -1] = 1.
 
-# TODO
-belHRI = np.zeros(xx.shape)
-belTemp = np.zeros(xx.shape)
-belHumidity = np.zeros(xx.shape)
+
+observedTemp = np.zeros(xx.shape)
+observedHumidity = np.zeros(xx.shape)
 
 J = np.zeros(xx.shape)
+covPos = .3 * np.array([
+    [scaleX/resolution, 0, 0],
+    [0., scaleY/resolution, 0],
+    [0., 0, scaleZ/resolution]
+])
+
+rospy.logdebug("{} cov={}".format(tag, covPos))
 
 wCollision = 1.
-wFence = .05
+wFence = .5
 wExplore = 1.
-zCollision = 2.
-zFence = 1.
+
+
+###############################################################################
+
 
 ###############################################################################
 # ROS main execution loop
+q_size = 2
 
-recvBelJointParam = {}  # type:dict[str, BelJoint]
-q_size = 10
+
+def updateMyBel(nbsJointBel):
+    """:type nbsJointBel: BelJointParam"""
+
+    if nbsJointBel.name == '': return
+
+    if name != "A" and nbsJointBel.A.exist:  # no need to hear about itself and hear if any msg exist
+        msgBelJoint.A = nbsJointBel.A
+        msgBelJoint.A.src = nbsJointBel.name
+
+    if name != "B" and nbsJointBel.B.exist:
+        msgBelJoint.B = nbsJointBel.B
+        msgBelJoint.B.src = nbsJointBel.name
+
+    if name != "C" and nbsJointBel.C.exist:
+        msgBelJoint.C = nbsJointBel.C
+        msgBelJoint.C.src = nbsJointBel.name
+
+    # rospy.logdebug("{}<=={} done {}<=={}".format(
+    #     tag, nb, [msgBelJoint.name, msgBelJoint.A.exist, msgBelJoint.B.exist, msgBelJoint.C.exist],
+    #     [nbsJointBel.name, nbsJointBel.A.exist, nbsJointBel.B.exist, nbsJointBel.C.exist])
+    # )
 
 
 def cbBelJointParam(msg):
     """:type msg BelJointParam"""
-    recvBelJointParam[msg.name] = msg
-    # rospy.logdebug("{}<--{} rcvs {}".format(tag, msg.name, recvBelJointParam.keys()))
+    nbsJointBel = copy.deepcopy(msg)
+    updateMyBel(nbsJointBel=nbsJointBel)
 
 
 pubsBelJointfParam = {}  # type: [dict, rospy.Publisher]
+subsBelJointfParam = {}  # type: [dict, rospy.SubscribeListener]
 
 for nb in neighbors:
     pubsBelJointfParam[nb] = rospy.Publisher(
@@ -213,7 +216,7 @@ pubBelJoint = rospy.Publisher(
 )
 
 for nb in neighbors:
-    rospy.Subscriber(
+    subsBelJointfParam[nb] = rospy.Subscriber(
         "/UAV/{}/bel_joint_param_{}".format(nb, name), callback=cbBelJointParam,
         data_class=BelJointParam, queue_size=q_size
     )
@@ -227,19 +230,27 @@ msgBelJoint.C = BelParam()
 rate = rospy.Rate(1)
 
 for nb in neighbors:
-    rospy.logdebug("{} neighbors {}".format(tag, neighbors))
+    rospy.logdebug("{} pub neighbors {}".format(tag, neighbors))
     while pubsBelJointfParam[nb].get_num_connections() < 1:
         rospy.logdebug("{} Waiting for nb {} to connect...".format(tag, nb))
         rospy.sleep(1)
 
+for nb in neighbors:
+    rospy.logdebug("{} sub neighbors {}".format(tag, neighbors))
+    while subsBelJointfParam[nb].get_num_connections() < 1:
+        rospy.logdebug("{} Waiting for nb {} to connect...".format(tag, nb))
+        rospy.sleep(1)
+
+jFence = wFence * normalizeArr(phiFence())
 while not rospy.is_shutdown():
-    np.random.shuffle(neighbors)  # WARNING! don't deprive any neighbor because of its ordering
+# for _ in range(20):
+    start = timeit.default_timer()
     msgOwnBel = BelParam()
     msgOwnBel.name = name
     msgOwnBel.src = name
     msgOwnBel.exist = True
     msgOwnBel.east = vehicle.location.local_frame.east
-    msgOwnBel.north = vehicle.location.local_frame.east
+    msgOwnBel.north = vehicle.location.local_frame.north
     msgOwnBel.up = -vehicle.location.local_frame.down
     msgOwnBel.std_ned = 2 * resolution
     # msgBelSelfParam.temperature_reading = TODO
@@ -249,118 +260,95 @@ while not rospy.is_shutdown():
     if name == "B": msgBelJoint.B = msgOwnBel
     if name == "C": msgBelJoint.C = msgOwnBel
 
-    # calc what robot thinks of others
+    np.random.shuffle(neighbors)
     for nb in neighbors:
-        nbsJointBel = BelJointParam()
-        if nb == "A" and recvBelJointParam.has_key(nb): nbsJointBel = copy.deepcopy(recvBelJointParam[nb])
-        if nb == "B" and recvBelJointParam.has_key(nb): nbsJointBel = copy.deepcopy(recvBelJointParam[nb])
-        if nb == "C" and recvBelJointParam.has_key(nb): nbsJointBel = copy.deepcopy(recvBelJointParam[nb])
-        updateMyBel(nbsJointBel, nb)
-
-    for toNb in neighbors:
-        msg = copy.deepcopy(msgBelJoint)
+        msgPropagate = copy.deepcopy(msgBelJoint)
         #  dont relay back the msg thats been heard from the one in the first place
-        if msg.A.src == toNb: msg.A.exist = False
-        if msg.B.src == toNb: msg.B.exist = False
-        if msg.C.src == toNb: msg.C.exist = False
-        msg.A.src = name
-        msg.B.src = name
-        msg.C.src = name
-        pubsBelJointfParam[nb].publish(msg)
+        if msgPropagate.A.src == nb: msgPropagate.A.exist = False
+        if msgPropagate.B.src == nb: msgPropagate.B.exist = False
+        if msgPropagate.C.src == nb: msgPropagate.C.exist = False
+        msgPropagate.A.src = name
+        msgPropagate.B.src = name
+        msgPropagate.C.src = name
+        pubsBelJointfParam[nb].publish(msgPropagate)
 
     # Intention: Collision avoidance
-    J = np.zeros(shape=xx.shape)
-    np.random.shuffle(team)
+    liveNbrs = []
+    meansList = []
+    covsList = []
+
     for uav in team:
         if uav == name: continue
-
-        muPos = None
         if uav == "A":
             if msgBelJoint.A.exist:
-                muPos = np.array([
-                    msgBelJoint.A.east,
-                    msgBelJoint.A.north,
-                    msgBelJoint.A.up
-                ])
+                meansList.append(
+                    np.array([
+                        msgBelJoint.A.east,
+                        msgBelJoint.A.north,
+                        msgBelJoint.A.up
+                    ])
+                )
+                liveNbrs.append(uav)
+                covsList.append(covPos)
         if uav == "B":
             if msgBelJoint.B.exist:
-                muPos = np.array([
-                    msgBelJoint.B.east,
-                    msgBelJoint.B.north,
-                    msgBelJoint.B.up
-                ])
+                meansList.append(
+                    np.array([
+                        msgBelJoint.B.east,
+                        msgBelJoint.B.north,
+                        msgBelJoint.B.up
+                    ])
+                )
+                liveNbrs.append(uav)
+                covsList.append(covPos)
         if uav == "C":
             if msgBelJoint.C.exist:
-                muPos = np.array([
-                    msgBelJoint.C.east,
-                    msgBelJoint.C.north,
-                    msgBelJoint.C.up
-                ])
+                meansList.append(
+                    np.array([
+                        msgBelJoint.C.east,
+                        msgBelJoint.C.north,
+                        msgBelJoint.C.up
+                    ])
+                )
+                liveNbrs.append(uav)
+                covsList.append(covPos)
 
-        belPos = np.zeros(shape=xx.shape)
-        if not muPos is None:
-            covPos = 3 * resolution * np.identity(3)
-            rv = multivariate_normal(muPos, covPos)
-            belPos = -np.reshape(rv.pdf(X), newshape=xx.shape, order='C')
-            belPos = (belPos - belPos.min()) / belPos.ptp()
+    jExplore = wExplore * normalizeArr(belExplore)
 
-        # Intention: Geo Fence
-        belFence = -np.reshape(phiFence(X), newshape=xx.shape, order='C')
-        belFence = (belFence - belFence.min()) / belFence.ptp()
-        belFence = np.nan_to_num(belFence, 0.)
+    if len(liveNbrs) >= 1:
+        gmm = GaussianMixture(n_components=len(liveNbrs), covariance_type='full')
+        gmm.weights_ = np.ones(len(liveNbrs))
+        gmm.means_ = np.array(meansList)
+        gmm.precisions_cholesky_ = _compute_precision_cholesky(np.array(covsList), 'full')
+        gmLgPdf = gmm.score_samples(X).reshape(xx.shape)
 
-        # Intention: Exploration
-        belExplore = (belExplore - belExplore.min()) / belExplore.ptp()
-        belExplore = np.nan_to_num(belExplore, 0.)
+        jCollision = wCollision * normalizeArr(gmLgPdf)
+        J = normalizeArr(jCollision + jExplore + jFence)
+    else:
 
-        J += (
-                wCollision * belPos
-        )
-
-    J /= zCollision
-    J = (J - J.min()) / J.ptp()
-    J = np.nan_to_num(J, 0.)
-
-    wExplore = J.max()/2.
-
-    J += (
-            wFence * belFence +
-            wExplore * belExplore
-    )
-
-    J = (J - J.min()) / J.ptp()
+        J = normalizeArr(jExplore + jFence)
 
     loc = locNEU()
-    dNN, indNNGrid = fastNN(loc)
-    indNNTupOfArr = np.where(np.logical_and(np.logical_and(xx == indNNGrid[0], yy == indNNGrid[1]), zz == indNNGrid[2]))
-    indNN = tuple(map(lambda arr: 0 if arr.size != 1 else arr[0], indNNTupOfArr))
+    nearestIndX = np.linalg.norm(X - loc, axis=1).argmin()
+    indNN = indXtoJ(nearestIndX)
+
     belExplore[indNN] = 1.
+
     # Gradient Calculation
-    dFy, dFx, dFz = v, u, w = np.gradient(J)
+    dFx, dFy, dFz = u, v, w = np.gradient(J)
 
-    # the magnitude of the gradient is too small
-    # However good for visualization
-    gmag = np.sqrt(u**2 + v**2 + w**2)
-    gmagNorm = (gmag - gmag.min())/gmag.ptp()
     uvwLoc = np.array([u[indNN], v[indNN], w[indNN]])
-    rospy.logdebug("{} uvwOrg {}".format(tag, uvwLoc))
-    if np.isclose(np.linalg.norm(uvwLoc), 0.):
-        uvwLoc = np.random.uniform(low=-vel, high=vel, size=3)
-        uvwLoc[2] = np.random.uniform(low=-.5, high=.0)
-        rospy.logdebug("{} {} {} {} {} *{} {}".format(tag, loc, indNNGrid, indNN, dNN, uvwLoc, gmag[indNN]))
-    else:
-        uvwLoc = np.array(map(lambda x: -1. if x>0. else 1., uvwLoc))
-        rospy.logdebug("{} {} {} {} {} {} {}".format(tag, loc, indNNGrid, indNN, dNN, uvwLoc, gmag[indNN]))
+    uvwLocNormVel = -(uvwLoc / np.abs(uvwLoc).max())
 
-    # if name != "A": send_ned_velocity(vel * uvwLoc[0], vel * uvwLoc[1], vel * uvwLoc[2])
+    if name != "A": send_ned_velocity(uvwNormVel=uvwLocNormVel)
+
     msgHRI = BelJoint()
     msgHRI.name = name
     msgHRI.src = name
     msgHRI.locNED = loc.flatten()
-    msgHRI.gnorm = gmag.flatten()
-    msgHRI.u = u.flatten()
-    msgHRI.v = v.flatten()
-    msgHRI.w = w.flatten()
+    msgHRI.J = J.flatten()
     msgHRI.uvwLoc = uvwLoc.flatten()
     pubBelJoint.publish(msgHRI)
+
+    if name != "A": rospy.logdebug("{} {} liveNb {} means {}  uvwLoc={} time={}".format(tag, loc, liveNbrs, meansList, uvwLoc, timeit.default_timer()-start))
     rate.sleep()

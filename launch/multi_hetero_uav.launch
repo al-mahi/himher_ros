@@ -2,13 +2,13 @@
 
     <param name="origin_lat" value="36.162263"/>
     <param name="origin_lon" value="-96.835559"/>
-    <param name="origin_alt" value="315"/>
+    <param name="origin_alt" value="355"/>
     <param name="dim" value="3"/>
     <param name="minX" value="-50"/>
     <param name="maxX" value="200"/>
     <param name="minY" value="-300"/>
     <param name="maxY" value="300"/>
-    <param name="minZ" value="-20"/>
+    <param name="minZ" value="-5"/>
     <param name="maxZ" value="200"/>
     <param name="res" value="5"/>
 
@@ -51,16 +51,34 @@
         <!--<node name="heart_bit_fly" pkg="himher_ros" type="heart_bit_fly.py" output="screen"></node>-->
     </group>
 
-    <group ns="Visual">
-        <node name="A" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">
-            <param name="name" value="A"/>
+    <!--<group ns="Visual">-->
+        <!--<node name="A" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">-->
+            <!--<param name="name" value="A"/>-->
+        <!--</node>-->
+        <node name="B70" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">
+            <param name="name" value="B70"/>
+            <param name="atAlt" value="70"/>
         </node>
-        <node name="B" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">
-            <param name="name" value="B"/>
+        <node name="B100" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">
+            <param name="name" value="B100"/>
+            <param name="atAlt" value="100"/>
         </node>
-        <node name="C" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">
-            <param name="name" value="C"/>
+        <!--<node name="B140" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">-->
+            <!--<param name="name" value="B140"/>-->
+            <!--<param name="atAlt" value="140"/>-->
+        <!--</node>-->
+        <node name="C70" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">
+            <param name="name" value="C70"/>
+            <param name="atAlt" value="70"/>
         </node>
-    </group>
+        <node name="C130" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">
+            <param name="name" value="C130"/>
+            <param name="atAlt" value="130"/>
+        </node>
+        <!--<node name="C160" pkg="himher_ros" type="viz2D.py" respawn="false" output="screen">-->
+            <!--<param name="name" value="C160"/>-->
+            <!--<param name="atAlt" value="160"/>-->
+        <!--</node>-->
+    <!--</group>-->
 
 </launch>
